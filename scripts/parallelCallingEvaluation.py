@@ -7,7 +7,7 @@ BAM files with reads must have been already downloaded.
 
 example run: ./parallelCallingEvaluation.py --batchSystem mesos --mesosMaster 10.0.0.5:5050 --realTimeLogging --logError --logDebug --edge_max 5 --kmer_size 16 --index_mode gcsa-mem --include_primary '/home/cmarkello/hgvmeval-jobstore1' '/home/cmarkello/debug_eval_input/BRCA1.vg' 'ref' '81189' '/home/cmarkello/debug_eval_input/BRCA1/NA12877/NA12877.bam.fq' 'NA12877' '/home/cmarkello/debug_eval_output'
 
-example run: ./parallelCallingEvaluation.py --offset 43044293 --edge_max 5 --kmer_size 16 --index_mode gcsa-mem --include_primary '/home/cmarkello/debug_eval_input/BRCA1.vg' 'ref' '81189' '/home/cmarkello/debug_eval_input/BRCA1/NA12877/NA12877.bam.fq' 'NA12877' '/home/cmarkello/debug_eval_output'
+example run: ./parallelCallingEvaluation.py --edge_max 5 --kmer_size 16 --index_mode gcsa-mem --include_primary '/home/cmarkello/debug_eval_input/BRCA1.vg' 'ref' 81189 '/home/cmarkello/debug_eval_input/BRCA1/NA12877/NA12877.bam.fq' 'NA12877' '/home/cmarkello/debug_eval_output'
 """
 
 import argparse, sys, os, os.path, random, subprocess, shutil, itertools, glob
@@ -48,9 +48,9 @@ def parse_args(args):
     # General options
     parser.add_argument("vg_graph", type=str,
         help="Input vg graph file path")
-    parser.add_argument("path_name",
+    parser.add_argument("path_name", type=str,
         help="Name of reference path in the graph (eg. ref or 17)")
-    parser.add_argument("path_size",
+    parser.add_argument("path_size", type=int,
         help="Size of the reference path in the graph")
     parser.add_argument("sample_reads", type=str,
         help="Path to sample reads in fastq format")
@@ -656,68 +656,11 @@ def run_calling(options, job_cores):
     path_name = options.path_name
     vg_path = options.vg_graph
     gam_path = options.out_dir + "/output.gam"
-
-    # do the pileup.  this is the most resource intensive step,
-    # especially in terms of mermory used.
-    pu_path = options.out_dir + "/" + options.sample_name + ".pu"
-    run("vg pileup {} {} -t {} {} > {}".format(
-        vg_path, gam_path, job_cores, options.pileup_opts, pu_path))
-
-    # do the calling.
-    tsv_path = options.out_dir + "/" + options.sample_name + "_call.tsv"
-    ag_path = options.out_dir + "/" + options.sample_name + "_call.vg"
-    run("vg call {} {} -t {} {} -l -c {} > {}".format(
-        vg_path, pu_path, job_cores, options.call_opts, tsv_path, ag_path))
-
-    # do the vcf export.
-    vcf_path = options.out_dir + "/" + options.sample_name + ".vcf"
     xg_path = options.out_dir + "/" + graph_filename + ".xg"
-    offset = xg_path_node_offset(xg_path, options.path_name, options.offset)
-    run("glenn2vcf {} {} -o {} -c {} -s {} -l {} > {} 2> {}".format(
-        ag_path, tsv_path, options.offset, options.path_name, options.sample_name, options.path_size,
-        vcf_path + ".us", vcf_path + ".log"))
-    sort_vcf(vcf_path + ".us", vcf_path)
-    run("rm {}".format(vcf_path + ".us"))
-    run("bgzip {}".format(vcf_path))
-    run("tabix -f -p vcf {}".format(vcf_path + ".gz"))
-
-def xg_path_node_id(xg_path, path_name, offset):
-    """ use vg find to get the node containing a given path position """
-    #NOTE: vg find -p range offsets are 0-based inclusive.  
-    stdout, stderr = run("vg find -x {} -p {}:{}-{} | vg mod -o - | vg view -j - | jq .node[0].id".format(
-        xg_path, path_name, offset, offset),
-                         proc_stdout=subprocess.PIPE)
-    return int(stdout)
-
-def xg_path_node_offset(xg_path, path_name, offset):
-    """ get the offset of the node containing the given position of a path
-    """
-    # first we find the node
-    node_id = xg_path_node_id(xg_path, path_name, offset)
-
-    # now we find the offset of the beginning of the node
-    stdout, stderr = run("vg find -x {} -P {} -n {}".format(
-        xg_path, path_name, node_id),
-                         proc_stdout=subprocess.PIPE)
-    toks = stdout.split()
-    # if len > 2 then we have a cyclic path, which we're assuming we don't
-    assert len(toks) == 2
-    assert toks[0] == str(node_id)
-    node_offset = int(toks[1])
-    # node_offset must be before
-    assert node_offset <= offset
-    # sanity check (should really use node size instead of 1000 here)
-    assert offset - node_offset < 1000
-
-    return node_offset
-
-def sort_vcf(vcf_path, sorted_vcf_path):
-    """ from vcflib """
-    run("head -10000 {} | grep \"^#\" > {}".format(
-        vcf_path, sorted_vcf_path))
-    run("grep -v \"^#\" {} | sort -k1,1d -k2,2n >> {}".format(
-        vcf_path, sorted_vcf_path))
     
+    # run chunked_call
+    run("chunked_call --overwrite --threads {} {} {} {} {} {} {}".format(
+        job_cores, xg_path, gam_path, options.path_name, options.path_size, options.sample_name, options.out_dir))
 
 def main(args):
     """
