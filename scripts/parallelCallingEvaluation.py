@@ -5,7 +5,7 @@ parallel.
 
 BAM files with reads must have been already downloaded.
 
-example run: ./parallelCallingEvaluation.py --batchSystem mesos --mesosMaster 10.0.0.5:5050 --realTimeLogging --logError --logDebug --edge_max 5 --kmer_size 16 --index_mode gcsa-mem --include_primary '/home/cmarkello/hgvmeval-jobstore1' '/home/cmarkello/debug_eval_input/BRCA1.vg' 'ref' '81189' '/home/cmarkello/debug_eval_input/BRCA1/NA12877/NA12877.bam.fq' 'NA12877' '/home/cmarkello/debug_eval_output'
+example run: ./parallelCallingEvaluation.py --batchSystem SingleMachine --realTimeLogging --logError --logDebug --edge_max 5 --kmer_size 16 --index_mode gcsa-mem --include_primary '/home/cmarkello/hgvmeval-jobstore1' '/home/cmarkello/debug_eval_input/BRCA1.vg' 'ref' '81189' '/home/cmarkello/debug_eval_input/BRCA1/NA12877/NA12877.bam.fq' 'NA12877' '/home/cmarkello/debug_eval_output'
 
 example run: ./parallelCallingEvaluation.py --edge_max 5 --kmer_size 16 --index_mode gcsa-mem --include_primary '/home/cmarkello/debug_eval_input/BRCA1.vg' 'ref' 81189 '/home/cmarkello/debug_eval_input/BRCA1/NA12877/NA12877.bam.fq' 'NA12877' '/home/cmarkello/debug_eval_output'
 """
@@ -43,7 +43,7 @@ def parse_args(args):
         formatter_class=argparse.RawDescriptionHelpFormatter)
 
     # Add the Toil options so the job store is the first argument
-    #Job.Runner.addToilOptions(parser)
+    Job.Runner.addToilOptions(parser)
 
     # General options
     parser.add_argument("vg_graph", type=str,
@@ -122,7 +122,7 @@ def run(cmd, proc_stdout = sys.stdout, proc_stderr = sys.stderr,
         check = True):
     """ run command in shell and throw exception if it doesn't work 
     """
-    print(cmd)
+    RealTimeLogger.get().info(cmd)
     proc = subprocess.Popen(cmd, shell=True, bufsize=-1,
                             stdout=proc_stdout, stderr=proc_stderr)
     output, errors = proc.communicate()
@@ -131,26 +131,24 @@ def run(cmd, proc_stdout = sys.stdout, proc_stderr = sys.stderr,
         raise RuntimeError("Command: %s exited with non-zero status %i" % (cmd, sts))
     return output, errors
 
-#def run_indexing(job, options):
-def run_indexing(options, job_cores):
+def run_indexing(job, options):
     """
     For each server listed in the server_list tsv, kick off child jobs to
     align and evaluate it.
 
     """
-    print("Starting indexing...")
+    
+    RealTimeLogger.get().info("Starting indexing...")
 
     graph_filename = ntpath.basename(options.vg_graph)
 
-
-
     # Now run the indexer.
     # TODO: support both indexing modes
-    print("Indexing {}".format(options.vg_graph))
+    RealTimeLogger.get().info("Indexing {}".format(options.vg_graph))
 
     if options.index_mode == "rocksdb":
         # Make the RocksDB index
-        run("vg index -s -k {} -e {} -t {} {} -d {}/{}.index".format(options.kmer_size, options.edge_max, job_cores, options.vg_graph, options.out_dir, graph_filename))
+        run("vg index -s -k {} -e {} -t {} {} -d {}/{}.index".format(options.kmer_size, options.edge_max, job.cores, options.vg_graph, options.out_dir, graph_filename))
 
     elif (options.index_mode == "gcsa-kmer" or
         options.index_mode == "gcsa-mem"):
@@ -170,7 +168,7 @@ def run_indexing(options, job_cores):
 
             if options.include_pruned:
 
-                print("Pruning {} to {}".format(
+                RealTimeLogger.get().info("Pruning {} to {}".format(
                     graph_filename, to_index_filename))
 
                 # Prune out hard bits of the graph
@@ -178,14 +176,14 @@ def run_indexing(options, job_cores):
 
                 # Prune out complex regions
                 tasks.append(subprocess.Popen(["vg", "mod",
-                    "-p", "-l", str(options.kmer_size), "-t", str(job_cores),
+                    "-p", "-l", str(options.kmer_size), "-t", str(job.cores),
                     "-e", str(options.edge_max), options.vg_graph],
                     stdout=subprocess.PIPE))
 
                 # Throw out short disconnected chunks
                 tasks.append(subprocess.Popen(["vg", "mod",
                     "-S", "-l", str(options.kmer_size * 2),
-                    "-t", str(job_cores), "-"], stdin=tasks[-1].stdout,
+                    "-t", str(job.cores), "-"], stdin=tasks[-1].stdout,
                     stdout=to_index_file))
 
                 # Did we make it through all the tasks OK?
@@ -202,7 +200,7 @@ def run_indexing(options, job_cores):
                 # "it's called, we retain "ref" and all the 19", "6", etc paths
                 # "from 1KG.
 
-                print(
+                RealTimeLogger.get().info(
                     "Adding primary path to {}".format(to_index_filename))
 
                 # See
@@ -224,7 +222,7 @@ def run_indexing(options, job_cores):
                 # Retain only the specified paths (only one should really exist)
                 tasks.append(subprocess.Popen(
                     ["vg", "mod", "-N"] + ref_options +
-                    ["-t", str(job_cores), options.vg_graph],
+                    ["-t", str(job.cores), options.vg_graph],
                     stdout=to_index_file))
 
                 # TODO: if we merged the primary path back on itself, it's
@@ -252,7 +250,7 @@ def run_indexing(options, job_cores):
 
             tasks = []
 
-            print("Finding kmers in {} to {}".format(
+            RealTimeLogger.get().info("Finding kmers in {} to {}".format(
                 to_index_filename, kmers_filename))
 
             # Deduplicate the graph
@@ -264,7 +262,7 @@ def run_indexing(options, job_cores):
             tasks.append(subprocess.Popen(["vg",
                 "kmers", "-g", "-B", "-k", str(options.kmer_size),
                 "-H", "1000000000", "-T", "1000000001",
-                "-t", str(job_cores), "-"], stdin=tasks[-1].stdout,
+                "-t", str(job.cores), "-"], stdin=tasks[-1].stdout,
                 stdout=kmers_file))
                 
             # Did we make it through all the tasks OK?
@@ -282,32 +280,27 @@ def run_indexing(options, job_cores):
         # Where do we put the GCSA2 index?
         gcsa_filename = options.out_dir + "/" + graph_filename + ".gcsa"
 
-        print("GCSA-indexing {} to {}".format(
+        RealTimeLogger.get().info("GCSA-indexing {} to {}".format(
                 kmers_filename, gcsa_filename))
 
         # Make the gcsa2 index. Make sure to use 3 doubling steps to work
         # around <https://github.com/vgteam/vg/issues/301>
-        subprocess.check_call(["vg", "index", "-t", str(job_cores), "-i",
+        subprocess.check_call(["vg", "index", "-t", str(job.cores), "-i",
             kmers_filename, "-g", gcsa_filename, "-X", "3"])
 
         # Where do we put the XG index?
         xg_filename = options.out_dir + "/" + graph_filename + ".xg"
 
-        print("XG-indexing {} to {}".format(
+        RealTimeLogger.get().info("XG-indexing {} to {}".format(
                 options.vg_graph, xg_filename))
 
-        subprocess.check_call(["vg", "index", "-t", str(job_cores), "-x",
+        subprocess.check_call(["vg", "index", "-t", str(job.cores), "-x",
             xg_filename, options.vg_graph])
     
-    # Define a file to keep the compressed index in, so we can send it to
-    # the output store.
-    index_dir_tgz = "{}/index.tar.gz".format(
-        options.out_dir)
+    #Run graph alignment
+    job.addChildJobFn(run_alignment, options, cores=32, memory="100G", disk="20G")
 
-    
-#def run_alignment(job, options, bin_dir_id, sample, graph_name, region,
-#    index_dir_id, sample_fastq_key, alignment_file_key, stats_file_key):
-def run_alignment(options, job_cores):
+def run_alignment(job, options):
 
     graph_filename = ntpath.basename(options.vg_graph)
     
@@ -332,7 +325,7 @@ def run_alignment(options, job_cores):
 
         # Plan out what to run
         vg_parts = ["vg", "map", "-f", fastq_file,
-            "-i", "-M2", "-a", "-u", "0", "-U", "-t", str(job_cores), graph_file]
+            "-i", "-M2", "-a", "-u", "0", "-U", "-t", str(job.cores), graph_file]
 
         if options.index_mode == "rocksdb":
             vg_parts += ["-d", graph_dir+"/"+graph_filename+".index", "-n3", "-k",
@@ -348,7 +341,7 @@ def run_alignment(options, job_cores):
         else:
             raise RuntimeError("invalid indexing mode: " + options.index_mode)
 
-        print(
+        RealTimeLogger.get().info(
             "Running VG for {} against {}: {}".format(options.sample_name, graph_filename,
             " ".join(vg_parts)))
 
@@ -366,12 +359,14 @@ def run_alignment(options, job_cores):
         run_time = end_time - start_time
 
 
-    print("Aligned {}. Process took {} seconds.".format(output_file, run_time))
+    RealTimeLogger.get().info("Aligned {}. Process took {} seconds.".format(output_file, run_time))
+    #Run alignment stats
+    job.addChildJobFn(run_stats, options, cores=2, memory="4G", disk="10G")
+    #Run variant calling
+    job.addChildJobFn(run_calling, options, cores=32, memory="100G", disk="20G")
 
 
-#def run_stats(job, options, bin_dir_id, index_dir_id, alignment_file_key,
-#    stats_file_key, run_time=None):
-def run_stats(options, job_cores):
+def run_stats(job, options):
     """
     If the stats aren't done, or if they need to be re-done, retrieve the
     alignment file from the output store under alignment_file_key and compute the
@@ -390,7 +385,7 @@ def run_stats(options, job_cores):
     
     """
 
-    print("Computing stats for {}".format(options.sample_name))
+    RealTimeLogger.get().info("Computing stats for {}".format(options.sample_name))
 
 
     graph_filename = ntpath.basename(options.vg_graph)
@@ -650,7 +645,7 @@ def run_stats(options, job_cores):
         raise RuntimeError("vg died with error {}".format(
             read_alignment.returncode))
 
-def run_calling(options, job_cores):
+def run_calling(job, options):
     
     graph_filename = ntpath.basename(options.vg_graph)
     path_name = options.path_name
@@ -660,7 +655,7 @@ def run_calling(options, job_cores):
     
     # run chunked_call
     run("chunked_call --overwrite --threads {} {} {} {} {} {} {}".format(
-        job_cores, xg_path, gam_path, options.path_name, options.path_size, options.sample_name, options.out_dir))
+        job.cores, xg_path, gam_path, options.path_name, options.path_size, options.sample_name, options.out_dir))
 
 def main(args):
     """
@@ -675,15 +670,17 @@ def main(args):
 
     options = parse_args(args) # This holds the nicely-parsed options object
     
-    run_indexing(options, job_cores=32)
+    RealTimeLogger.start_master()
     
-    run_alignment(options, job_cores=32)
+    # Make a root job
+    root_job = Job.wrapJobFn(run_indexing, options, job.cores=32, memory="50G", disk="20G")
     
-    run_stats(options, job_cores=2)
-
-    run_calling(options, job_cores=32)
+    # Run it and see how many jobs fail
+    failed_jobs = Job.Runner.startToil(root_job,  options)
 
     print("All jobs completed successfully")
+    
+    RealTimeLogger.stop_master()
 
 if __name__ == "__main__" :
     sys.exit(main(sys.argv))
