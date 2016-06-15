@@ -5,7 +5,7 @@ parallel.
 
 BAM files with reads must have been already downloaded.
 
-example run: ./parallelCallingEvaluation.py --batchSystem SingleMachine --realTimeLogging --logError --logDebug --edge_max 5 --kmer_size 16 --index_mode gcsa-mem --include_primary '/home/cmarkello/hgvmeval-jobstore1' '/home/cmarkello/debug_eval_input/BRCA1.vg' 'ref' '81189' '/home/cmarkello/debug_eval_input/BRCA1/NA12877/NA12877.bam.fq' 'NA12877' '/home/cmarkello/debug_eval_output'
+example run: ./parallelCallingEvaluation.py --realTimeLogging --logError --logDebug --edge_max 5 --kmer_size 16 --index_mode gcsa-mem --include_primary '/home/cmarkello/hgvmeval-jobstore1' '/home/cmarkello/debug_eval_input/BRCA1.vg' 'ref' '81189' '/home/cmarkello/debug_eval_input/BRCA1/NA12877/NA12877.bam.fq' 'NA12877' '/home/cmarkello/debug_eval_output'
 
 example run: ./parallelCallingEvaluation.py --edge_max 5 --kmer_size 16 --index_mode gcsa-mem --include_primary '/home/cmarkello/debug_eval_input/BRCA1.vg' 'ref' 81189 '/home/cmarkello/debug_eval_input/BRCA1/NA12877/NA12877.bam.fq' 'NA12877' '/home/cmarkello/debug_eval_output'
 """
@@ -673,7 +673,7 @@ def main(args):
     RealTimeLogger.start_master()
     
     # Make a root job
-    root_job = Job.wrapJobFn(run_indexing, options, job.cores=32, memory="50G", disk="20G")
+    root_job = Job.wrapJobFn(run_indexing, options, cores=32, memory="50G", disk="20G")
     
     # Run it and see how many jobs fail
     failed_jobs = Job.Runner.startToil(root_job,  options)
