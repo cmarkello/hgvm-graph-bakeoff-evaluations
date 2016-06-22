@@ -7,7 +7,7 @@ BAM files with reads must have been already downloaded.
 
 example run: ./parallelCallingEvaluation.py --realTimeLogging --logError --logDebug --edge_max 5 --kmer_size 16 --index_mode gcsa-mem --include_primary '/home/cmarkello/hgvmeval-jobstore1' '/home/cmarkello/debug_eval_input/BRCA1.vg' 'ref' '81189' '/home/cmarkello/debug_eval_input/BRCA1/NA12877/NA12877.bam.fq' 'NA12877' '/home/cmarkello/debug_eval_output'
 
-example run: ./parallelCallingEvaluation.py --edge_max 5 --kmer_size 16 --index_mode gcsa-mem --include_primary '/home/cmarkello/debug_eval_input/BRCA1.vg' 'ref' 81189 '/home/cmarkello/debug_eval_input/BRCA1/NA12877/NA12877.bam.fq' 'NA12877' '/home/cmarkello/debug_eval_output'
+example run: ./parallelCallingEvaluation.py --edge_max 5 --kmer_size 16 --index_mode gcsa-mem --include_primary '/home/cmarkello/debug_eval_input/BRCA1.vg' 'ref' 81189 '/home/cmarkello/debug_eval_input/BRCA1/NA12877/NA12877.bam.fq' 'NA12877' '/home/cmarkello/debug_eval_output' 'azure:hgvm:hgvmdebugtest-input' 'azure:hgvm:hgvmdebugtest-output'
 """
 
 import argparse, sys, os, os.path, random, subprocess, shutil, itertools, glob
@@ -58,6 +58,11 @@ def parse_args(args):
         help="sample name (ex NA12878)")
     parser.add_argument("out_dir", type=str,
         help="directory where all output will be written")
+    parser.add_argument("input_store",
+        help="sample input IOStore where input files will be temporarily uploaded")
+    parser.add_argument("out_store",
+        help="output IOStore to create and fill with files that will be\n
+             downloaded to the local machine where this toil script was run")
     parser.add_argument("--offset", type=int,
         help="chromosomal position offset. e.g. 43044293")
     parser.add_argument("--edge_max", type=int, default=5,
@@ -139,8 +144,17 @@ def run_indexing(job, options):
     """
     
     RealTimeLogger.get().info("Starting indexing...")
+    
+    input_store = IOStore.get(options.input_store)
+    output_store = IOStore.get(options.output_store)
 
-    graph_filename = ntpath.basename(options.vg_graph)
+    graph_file = ntpath.basename(options.vg_graph)
+
+    # Download local input files from the remote storage container
+    graph_dir = job.fileStore.getLocalTempDir()
+    graph_filename = "{}/graph.vg".format(graph_dir)
+    graph_file_remote_path = graph_file
+    input_store.read_input_file(graph_file_remote_path, graph_file)
 
     # Now run the indexer.
     # TODO: support both indexing modes
@@ -148,7 +162,7 @@ def run_indexing(job, options):
 
     if options.index_mode == "rocksdb":
         # Make the RocksDB index
-        run("vg index -s -k {} -e {} -t {} {} -d {}/{}.index".format(options.kmer_size, options.edge_max, job.cores, options.vg_graph, options.out_dir, graph_filename))
+        run("vg index -s -k {} -e {} -t {} {} -d {}/{}.index".format(options.kmer_size, options.edge_max, job.cores, graph_filename, graph_dir, graph_file))
 
     elif (options.index_mode == "gcsa-kmer" or
         options.index_mode == "gcsa-mem"):
@@ -158,11 +172,11 @@ def run_indexing(job, options):
         # What will we use as our temp combined graph file (containing only
         # the bits of the graph we want to index, used for deduplication)?
         to_index_filename = "{}/to_index.vg".format(
-            options.out_dir)
+            job.fileStore.getLocalTempDir())
 
         # Where will we save the kmers?
         kmers_filename = "{}/index.graph".format(
-            options.out_dir)
+            job.fileStore.getLocalTempDir())
 
         with open(to_index_filename, "w") as to_index_file:
 
@@ -177,7 +191,7 @@ def run_indexing(job, options):
                 # Prune out complex regions
                 tasks.append(subprocess.Popen(["vg", "mod",
                     "-p", "-l", str(options.kmer_size), "-t", str(job.cores),
-                    "-e", str(options.edge_max), options.vg_graph],
+                    "-e", str(options.edge_max), graph_filename],
                     stdout=subprocess.PIPE))
 
                 # Throw out short disconnected chunks
@@ -222,7 +236,7 @@ def run_indexing(job, options):
                 # Retain only the specified paths (only one should really exist)
                 tasks.append(subprocess.Popen(
                     ["vg", "mod", "-N"] + ref_options +
-                    ["-t", str(job.cores), options.vg_graph],
+                    ["-t", str(job.cores), graph_filename],
                     stdout=to_index_file))
 
                 # TODO: if we merged the primary path back on itself, it's
@@ -278,10 +292,22 @@ def run_indexing(job, options):
         time.sleep(1)
 
         # Where do we put the GCSA2 index?
-        gcsa_filename = options.out_dir + "/" + graph_filename + ".gcsa"
+        gcsa_filename = graph_filename + ".gcsa"
 
         RealTimeLogger.get().info("GCSA-indexing {} to {}".format(
                 kmers_filename, gcsa_filename))
+
+        ##### DEBUGGING STATEMENTS #####
+        currPathName = job.fileStore.getLocalTempDir()
+        currentPath = currPathName[:currPathName.find('/localTempDir')]
+        f = [] 
+        for (dirpath,dirnames,filenames) in os.walk(currentPath):
+            f.extend(filenames)
+        
+        RealTimeLogger.get().info("Working directory file list: {}".format(
+                f))  
+        ##### END DEBUGGING STATEMENTS #####
+
 
         # Make the gcsa2 index. Make sure to use 3 doubling steps to work
         # around <https://github.com/vgteam/vg/issues/301>
@@ -289,34 +315,62 @@ def run_indexing(job, options):
             kmers_filename, "-g", gcsa_filename, "-X", "3"])
 
         # Where do we put the XG index?
-        xg_filename = options.out_dir + "/" + graph_filename + ".xg"
+        xg_filename = graph_filename + ".xg"
 
         RealTimeLogger.get().info("XG-indexing {} to {}".format(
-                options.vg_graph, xg_filename))
+                graph_filename, xg_filename))
 
         subprocess.check_call(["vg", "index", "-t", str(job.cores), "-x",
-            xg_filename, options.vg_graph])
+            xg_filename, graph_filename])
+    
+    else:
+        raise RuntimeError("Invalid indexing mode: " + options.index_mode)
+
+    # Define a file to keep the compressed index in, so we can send it to
+    # the output store.
+    index_dir_tgz = "{}/index.tar.gz".format(
+        job.fileStore.getLocalTempDir())
+
+    # Now save the indexed graph directory to the file store. It can be
+    # cleaned up since only our children use it.
+    RealTimeLogger.get().info("Compressing index of {}".format(
+        graph_filename))
+    index_dir_id = write_global_directory(job.fileStore, graph_dir,
+        cleanup=True, tee=index_dir_tgz)
+
+    # Save it as output
+    RealTimeLogger.get().info("Uploading index of {}".format(
+        graph_filename))
+    index_key = ntpath.basename(index_dir_tgz)
+    out_store.write_output_file(index_dir_tgz, index_key)
+    RealTimeLogger.get().info("Index {} uploaded successfully".format(
+        index_key))
     
     #Run graph alignment
-    job.addChildJobFn(run_alignment, options, cores=32, memory="100G", disk="20G")
+    job.addChildJobFn(run_alignment, options, index_dir_id, cores=32, memory="100G", disk="20G")
 
-def run_alignment(job, options):
+def run_alignment(job, options, index_dir_id):
 
-    graph_filename = ntpath.basename(options.vg_graph)
-    
-    graph_dir = options.out_dir
-    
+    input_store = IOStore.get(options.input_store)
+    output_store = IOStore.get(options.output_store)
+
     # How long did the alignment take to run, in seconds?
     run_time = None
-
+    
+    # Download the indexed graph to a directory we can use
+    graph_dir = job.fileStore.getLocalTempDir()
+    read_global_directory(job.fileStore, index_dir_id, graph_dir)
+    
     # We know what the vg file in there will be named
-    graph_file = options.vg_graph
+    graph_file = "{}/graph.vg".format(graph_dir)
 
     # Also we need the sample fastq
-    fastq_file = options.sample_reads
+    sample_filename = ntpath.basename(options.sample_reads)
+    fastq_file = "{}/input.fq".format(job.fileStore.getLocalTempDir())
+    input_store.read_input_file(sample_filename, fastq_file)
 
     # And a temp file for our aligner output
-    output_file = "{}/output.gam".format(graph_dir)
+    output_file = "{}/output.gam".format(job.fileStore.getLocalTempDir())
 
     # Open the file stream for writing
     with open(output_file, "w") as alignment_file:
@@ -328,21 +382,21 @@ def run_alignment(job, options):
             "-i", "-M2", "-a", "-u", "0", "-U", "-t", str(job.cores), graph_file]
 
         if options.index_mode == "rocksdb":
-            vg_parts += ["-d", graph_dir+"/"+graph_filename+".index", "-n3", "-k",
+            vg_parts += ["-d", graph_file+".index", "-n3", "-k",
                 str(options.kmer_size)]
         elif options.index_mode == "gcsa-kmer":
             # Use the new default context size in this case
-            vg_parts += ["-x", graph_dir+"/"+graph_filename+ ".xg", "-g", graph_dir+"/"+graph_filename + ".gcsa",
+            vg_parts += ["-x", graph_file+ ".xg", "-g", graph_file + ".gcsa",
                 "-n5", "-k", str(options.kmer_size)]
         elif options.index_mode == "gcsa-mem":
             # Don't pass the kmer size, so MEM matching is used
-            vg_parts += ["-x", graph_dir+"/"+graph_filename+ ".xg", "-g", graph_dir+"/"+graph_filename + ".gcsa",
+            vg_parts += ["-x", graph_file+ ".xg", "-g", graph_file+ ".gcsa",
                 "-n5"]
         else:
             raise RuntimeError("invalid indexing mode: " + options.index_mode)
 
         RealTimeLogger.get().info(
-            "Running VG for {} against {}: {}".format(options.sample_name, graph_filename,
+            "Running VG for {} against {}: {}".format(options.sample_name, graph_file,
             " ".join(vg_parts)))
 
         # Mark when we start the alignment
@@ -360,6 +414,13 @@ def run_alignment(job, options):
 
 
     RealTimeLogger.get().info("Aligned {}. Process took {} seconds.".format(output_file, run_time))
+    
+    # Upload the alignment
+    alignment_file_key = ntpath.basename(output_file)
+    out_store.write_output_file(output_file, alignment_file_key)
+    
+    ###### TODO: FINISH refactor of run_stats and run_calling ######
+
     #Run alignment stats
     job.addChildJobFn(run_stats, options, cores=2, memory="4G", disk="10G")
     #Run variant calling
@@ -671,6 +732,12 @@ def main(args):
     options = parse_args(args) # This holds the nicely-parsed options object
     
     RealTimeLogger.start_master()
+
+    # Upload local input files to the remote storage container
+    graph_filename = ntpath.basename(options.vg_graph)
+    input_store.write_output_file(options.vg_graph, graph_filename)
+    sample_filename = ntpath.basename(options.sample_reads)
+    input_store.write_output_file(options.sample_reads, sample_filename)
     
     # Make a root job
     root_job = Job.wrapJobFn(run_indexing, options, cores=32, memory="50G", disk="20G")
